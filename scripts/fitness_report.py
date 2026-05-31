@@ -1,7 +1,20 @@
 """
-Fitness PDF report generator.
+Fitness PDF report generator (planned vs. actual).
+
 Charts: matplotlib (server-side PNGs, in-memory).
-PDF: ReportLab (no browser dependency).
+PDF:    ReportLab (no browser dependency).
+
+Shows the PLANNED schedule the user set up — planned calorie intake per day and
+planned workouts for the week — and overlays what was actually done. Days with no
+logged data still appear, using the plan so the report can "show the future".
+
+LANGUAGE REQUIREMENT
+--------------------
+All input data and all rendered text MUST be in English. The PDF uses the built-in
+Helvetica font, which does not render Hebrew / Arabic / other non-Latin scripts
+(they appear as blank boxes or mirrored). The bot must translate or romanize any
+user-facing strings (workout type names, notes, plan name, etc.) to English BEFORE
+passing them in.
 
 Usage:
     generate_report(data, mode="daily",  out="report.pdf")
@@ -27,12 +40,13 @@ from reportlab.platypus import (
 )
 
 # ---- theme ----------------------------------------------------------------
-ACCENT   = colors.HexColor("#1f6feb")
-ACCENT_2 = colors.HexColor("#22c55e")
-MUTED    = colors.HexColor("#6b7280")
-LIGHT    = colors.HexColor("#f3f4f6")
-DARK     = colors.HexColor("#111827")
-MACRO_COLORS = ["#1f6feb", "#22c55e", "#f59e0b"]  # P / C / F
+ACCENT     = colors.HexColor("#1f6feb")   # planned / primary
+ACTUAL     = colors.HexColor("#22c55e")   # actual / done
+MUTED      = colors.HexColor("#6b7280")
+LIGHT      = colors.HexColor("#f3f4f6")
+DARK       = colors.HexColor("#111827")
+DONE_BG    = colors.HexColor("#dcfce7")   # green-tint row: completed
+PENDING_BG = colors.HexColor("#fef9c3")   # yellow-tint row: planned / not yet done
 
 
 # ---- chart helpers (return PNG bytes) -------------------------------------
@@ -44,51 +58,56 @@ def _fig_to_png(fig):
     return buf
 
 
-def macro_donut(protein_g, carbs_g, fat_g):
-    total = max(protein_g + carbs_g + fat_g, 1)
-    fig, ax = plt.subplots(figsize=(3.2, 3.2))
-    vals = [protein_g, carbs_g, fat_g]
-    ax.pie(vals, colors=MACRO_COLORS, startangle=90,
-           wedgeprops=dict(width=0.42, edgecolor="white"),
-           autopct=lambda p: f"{p:.0f}%", pctdistance=0.78,
-           textprops=dict(color="white", fontsize=9, weight="bold"))
-    ax.text(0, 0, f"{int(total)}g", ha="center", va="center",
-            fontsize=13, weight="bold", color="#111827")
-    ax.legend(["Protein", "Carbs", "Fat"], loc="lower center",
-              bbox_to_anchor=(0.5, -0.12), ncol=3, frameon=False, fontsize=8)
-    return _fig_to_png(fig)
-
-
-def calories_bar(labels, intake, target):
-    fig, ax = plt.subplots(figsize=(6.4, 2.6))
-    x = range(len(labels))
-    ax.bar(x, intake, color="#1f6feb", width=0.6, label="Intake")
-    ax.axhline(target, color="#ef4444", ls="--", lw=1.3, label=f"Target {target}")
-    ax.set_xticks(list(x)); ax.set_xticklabels(labels, fontsize=8)
+def calories_planned_vs_actual(labels, planned, actual, target=None):
+    """
+    Grouped bars per day: planned intake vs actual intake.
+    `actual` may contain None for days with no logged data — those days still
+    show the planned bar (the "future"/prediction) and simply omit the actual bar.
+    Optional `target` draws a dashed reference line.
+    """
+    n = len(labels)
+    x = range(n)
+    w = 0.4
+    # Replace None in actual with 0 height but remember which were missing.
+    actual_vals = [0 if v is None else v for v in actual]
+    fig, ax = plt.subplots(figsize=(6.6, 2.9))
+    ax.bar([i - w / 2 for i in x], planned, width=w,
+           color="#1f6feb", label="Planned", alpha=0.55)
+    # Only draw actual bars where data exists.
+    ax_x = [i + w / 2 for i in x]
+    ax.bar(ax_x, actual_vals, width=w, color="#22c55e", label="Actual")
+    if target is not None:
+        ax.axhline(target, color="#ef4444", ls="--", lw=1.2, label=f"Target {target}")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(labels, fontsize=8)
     ax.set_ylabel("kcal", fontsize=8)
+    ax.legend(frameon=False, fontsize=8, loc="upper right", ncol=3)
+    for s in ("top", "right"):
+        ax.spines[s].set_visible(False)
+    ax.tick_params(labelsize=8)
+    # Mark missing-actual days with a small "—" under the axis.
+    for i, v in enumerate(actual):
+        if v is None:
+            ax.annotate("no data", (i + w / 2, 0), textcoords="offset points",
+                        xytext=(0, 4), ha="center", fontsize=6, color="#9ca3af",
+                        rotation=90)
+    return _fig_to_png(fig)
+
+
+def workout_type_bar(type_labels, planned_counts, done_counts):
+    """Per workout-type: planned vs completed counts."""
+    n = len(type_labels)
+    x = range(n)
+    w = 0.4
+    fig, ax = plt.subplots(figsize=(6.6, 2.9))
+    ax.bar([i - w / 2 for i in x], planned_counts, width=w, color="#1f6feb",
+           alpha=0.55, label="Planned")
+    ax.bar([i + w / 2 for i in x], done_counts, width=w, color="#22c55e",
+           label="Done")
+    ax.set_xticks(list(x))
+    ax.set_xticklabels(type_labels, fontsize=8)
+    ax.set_ylabel("workouts", fontsize=8)
     ax.legend(frameon=False, fontsize=8, loc="upper right")
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    ax.tick_params(labelsize=8)
-    return _fig_to_png(fig)
-
-
-def weight_line(labels, weights):
-    fig, ax = plt.subplots(figsize=(6.4, 2.6))
-    ax.plot(labels, weights, color="#22c55e", marker="o", lw=2, ms=5)
-    ax.fill_between(range(len(weights)), weights, min(weights) - 0.5,
-                    color="#22c55e", alpha=0.08)
-    ax.set_ylabel("kg", fontsize=8)
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    ax.tick_params(labelsize=8)
-    return _fig_to_png(fig)
-
-
-def volume_bar(labels, volumes):
-    fig, ax = plt.subplots(figsize=(6.4, 2.6))
-    ax.bar(labels, volumes, color="#8b5cf6", width=0.6)
-    ax.set_ylabel("sets", fontsize=8)
     for s in ("top", "right"):
         ax.spines[s].set_visible(False)
     ax.tick_params(labelsize=8)
@@ -103,6 +122,8 @@ def _styles():
     ss.add(ParagraphStyle("Sub", fontSize=9.5, textColor=MUTED, spaceAfter=2))
     ss.add(ParagraphStyle("Sec", fontSize=13, textColor=ACCENT, spaceBefore=10,
                           spaceAfter=6, leading=16))
+    ss.add(ParagraphStyle("TypeHdr", fontSize=10.5, textColor=DARK, spaceBefore=6,
+                          spaceAfter=3, leading=13, fontName="Helvetica-Bold"))
     ss.add(ParagraphStyle("KpiV", fontSize=15, textColor=DARK, alignment=1,
                           leading=17, fontName="Helvetica-Bold"))
     ss.add(ParagraphStyle("KpiL", fontSize=7.5, textColor=MUTED, alignment=1))
@@ -110,8 +131,7 @@ def _styles():
 
 
 def kpi_row(items, S):
-    """items = [(label, value), ...]"""
-    cells = [[Paragraph(v, S["KpiV"]), Paragraph(l, S["KpiL"])] for l, v in items]
+    cells = [[Paragraph(str(v), S["KpiV"]), Paragraph(str(l), S["KpiL"])] for l, v in items]
     inner = [Table([[c[0]], [c[1]]], style=TableStyle([
         ("ALIGN", (0, 0), (-1, -1), "CENTER"),
         ("TOPPADDING", (0, 0), (-1, -1), 6),
@@ -124,7 +144,6 @@ def kpi_row(items, S):
         ("INNERGRID", (0, 0), (-1, -1), 3, colors.white),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
     ]
-    # ROUNDEDCORNERS needs ReportLab >= 3.6; guard so older versions don't throw.
     try:
         from reportlab import Version as _RLV
         if tuple(int(x) for x in _RLV.split(".")[:2]) >= (3, 6):
@@ -135,28 +154,39 @@ def kpi_row(items, S):
     return t
 
 
-def data_table(header, rows, totals=None, col_widths=None):
-    body = [header] + rows
-    if totals:
-        body.append(totals)
-    t = Table(body, colWidths=col_widths, repeatRows=1)
+def workout_table(rows, S):
+    """
+    rows: list of dicts: {"name", "detail", "done" (bool), "note"}
+    Status-colored rows: green = done, yellow = planned/not done.
+    """
+    header = ["Workout", "Detail", "Status", "Note"]
+    body = [header]
+    status_rows = []
+    for i, r in enumerate(rows, start=1):
+        done = bool(r.get("done"))
+        body.append([
+            r.get("name", ""),
+            r.get("detail", ""),
+            "Done" if done else "Planned",
+            r.get("note", ""),
+        ])
+        status_rows.append((i, done))
+    t = Table(body, colWidths=[52 * mm, 46 * mm, 24 * mm, 48 * mm], repeatRows=1)
     style = [
         ("BACKGROUND", (0, 0), (-1, 0), ACCENT),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
         ("FONTSIZE", (0, 0), (-1, -1), 8.5),
-        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("FONTNAME", (2, 1), (2, -1), "Helvetica-Bold"),
     ]
-    if totals:
-        style += [
-            ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#e0ecff")),
-            ("FONTNAME", (0, -1), (-1, -1), "Helvetica-Bold"),
-        ]
+    for ridx, done in status_rows:
+        style.append(("BACKGROUND", (0, ridx), (-1, ridx),
+                      DONE_BG if done else PENDING_BG))
     t.setStyle(TableStyle(style))
     return t
 
@@ -173,7 +203,7 @@ def _footer(canvas, doc):
     canvas.saveState()
     canvas.setFont("Helvetica", 7.5)
     canvas.setFillColor(MUTED)
-    canvas.drawString(20 * mm, 12 * mm, f"Generated {date.today():%Y-%m-%d} · OpenClaw Fitness Bot")
+    canvas.drawString(20 * mm, 12 * mm, f"Generated {date.today():%Y-%m-%d} - Fitness Bot")
     canvas.drawRightString(190 * mm, 12 * mm, f"Page {doc.page}")
     canvas.setStrokeColor(colors.HexColor("#e5e7eb"))
     canvas.line(20 * mm, 15 * mm, 190 * mm, 15 * mm)
@@ -181,17 +211,26 @@ def _footer(canvas, doc):
 
 
 # ---- main -----------------------------------------------------------------
-def generate_report(data, mode="daily", out="report.pdf"):
+def generate_report(data, mode="weekly", out="report.pdf"):
     """
-    data dict shape (see __main__ for full example):
-        user, plan, range_label, summary_line,
+    Build a planned-vs-actual fitness PDF. See references/data_schema.md for the
+    full input contract. All strings must be English (Helvetica can't render
+    Hebrew/Arabic).
+
+    Required keys (all modes):
+        user, plan, range_label, summary_line
         kpis: [(label, value), ...]
-        macros: {protein, carbs, fat}
-        cal_labels, cal_intake, cal_target
-        weight_labels, weights              (weekly only)
-        vol_labels, vol_values              (weekly only)
-        nutrition: {header, rows, totals}
-        workout:   {header, rows}
+        cal_labels:  [str, ...]            x-axis (days for weekly, meals/day for daily)
+        cal_planned: [number, ...]         planned intake per label
+        cal_actual:  [number|None, ...]    actual intake; None => no data (shows plan only)
+        cal_target:  number | None         optional dashed reference line
+        workouts_by_type: {
+            "<Type name in English>": [
+                {"name", "detail", "done": bool, "note"}, ...
+            ], ...
+        }
+    Weekly also uses:
+        type_summary: derived automatically from workouts_by_type if absent
     """
     S = _styles()
     doc = SimpleDocTemplate(out, pagesize=A4,
@@ -200,8 +239,8 @@ def generate_report(data, mode="daily", out="report.pdf"):
     E = []
 
     # header
-    E.append(Paragraph(f"{data['plan']} — {mode.title()} Report", S["H"]))
-    E.append(Paragraph(f"{data['user']} · {data['range_label']}", S["Sub"]))
+    E.append(Paragraph(f"{data['plan']} - {mode.title()} Report", S["H"]))
+    E.append(Paragraph(f"{data['user']} - {data['range_label']}", S["Sub"]))
     E.append(Paragraph(data["summary_line"], S["Sub"]))
     E.append(Spacer(1, 4))
     E.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#e5e7eb")))
@@ -211,34 +250,33 @@ def generate_report(data, mode="daily", out="report.pdf"):
     E.append(kpi_row(data["kpis"], S))
     E.append(Spacer(1, 10))
 
-    # charts
-    E.append(Paragraph("Overview", S["Sec"]))
-    m = data["macros"]
-    donut = img(macro_donut(m["protein"], m["carbs"], m["fat"]), 70)
-    cals = img(calories_bar(data["cal_labels"], data["cal_intake"], data["cal_target"]), 100)
-    top = Table([[donut, cals]], colWidths=[72 * mm, 102 * mm])
-    top.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
-    E.append(top)
+    # calorie chart: planned vs actual
+    E.append(Paragraph("Calorie Intake - Planned vs Actual", S["Sec"]))
+    cals = img(calories_planned_vs_actual(
+        data["cal_labels"], data["cal_planned"], data["cal_actual"],
+        data.get("cal_target")), 168)
+    E.append(cals)
 
-    if mode == "weekly":
-        E.append(Spacer(1, 6))
-        w = img(weight_line(data["weight_labels"], data["weights"]), 82)
-        v = img(volume_bar(data["vol_labels"], data["vol_values"]), 82)
-        bottom = Table([[w, v]], colWidths=[87 * mm, 87 * mm])
-        bottom.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
-        E.append(bottom)
+    # workout-type summary chart (planned vs done counts)
+    wbt = data.get("workouts_by_type", {})
+    if wbt:
+        type_labels = list(wbt.keys())
+        planned_counts = [len(v) for v in wbt.values()]
+        done_counts = [sum(1 for w in v if w.get("done")) for v in wbt.values()]
+        E.append(Paragraph("Workouts by Type - Planned vs Done", S["Sec"]))
+        E.append(img(workout_type_bar(type_labels, planned_counts, done_counts), 168))
 
-    # nutrition
-    E.append(Paragraph("Nutrition", S["Sec"]))
-    n = data["nutrition"]
-    E.append(data_table(n["header"], n["rows"], n.get("totals"),
-                        col_widths=[60 * mm, 30 * mm, 27 * mm, 27 * mm, 26 * mm]))
-
-    # workout
-    E.append(Paragraph("Training", S["Sec"]))
-    wo = data["workout"]
-    E.append(data_table(wo["header"], wo["rows"],
-                        col_widths=[58 * mm, 30 * mm, 30 * mm, 52 * mm]))
+    # workout detail, grouped by type
+    if wbt:
+        E.append(Paragraph("Workout Schedule", S["Sec"]))
+        for tname, items in wbt.items():
+            done_n = sum(1 for w in items if w.get("done"))
+            E.append(Paragraph(f"{tname}  ({done_n}/{len(items)} done)", S["TypeHdr"]))
+            if items:
+                E.append(workout_table(items, S))
+            else:
+                E.append(Paragraph("No workouts planned.", S["Sub"]))
+            E.append(Spacer(1, 4))
 
     doc.build(E, onFirstPage=_footer, onLaterPages=_footer)
     return out
@@ -247,48 +285,62 @@ def generate_report(data, mode="daily", out="report.pdf"):
 # ---- demo data ------------------------------------------------------------
 if __name__ == "__main__":
     weekly = {
-        "user": "Alex R.", "plan": "Lean Cut",
-        "range_label": "May 25 – May 31, 2026",
-        "summary_line": "Goal: Cut · 1,800 kcal/day target · 4 workouts/week",
+        "user": "Alex R.",
+        "plan": "Lean Cut",
+        "range_label": "May 25 - May 31, 2026",
+        "summary_line": "Goal: Cut - 1,800 kcal/day target - 4 workouts/week",
         "kpis": [
-            ("Avg kcal", "1,765"),
-            ("Protein", "148g"),
-            ("Workouts", "4/4"),
-            ("Weight Δ", "-0.6 kg"),
+            ("Avg planned", "1,800"),
+            ("Avg actual", "1,765"),
+            ("Workouts done", "3/4"),
+            ("Days logged", "4/7"),
         ],
-        "macros": {"protein": 148, "carbs": 165, "fat": 52},
-        "cal_labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-        "cal_intake": [1720, 1850, 1690, 1810, 1900, 1650, 1730],
-        "cal_target": 1800,
-        "weight_labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-        "weights": [78.4, 78.2, 78.1, 77.9, 78.0, 77.8, 77.8],
-        "vol_labels": ["Push", "Pull", "Legs", "Full"],
-        "vol_values": [22, 20, 24, 16],
-        "nutrition": {
-            "header": ["Meal", "kcal", "P (g)", "C (g)", "F (g)"],
-            "rows": [
-                ["Breakfast", "420", "32", "45", "12"],
-                ["Lunch", "560", "48", "52", "18"],
-                ["Snack", "210", "18", "20", "6"],
-                ["Dinner", "575", "50", "48", "16"],
+        "cal_labels":  ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+        "cal_planned": [1800, 1800, 1800, 1800, 1800, 2000, 2000],
+        "cal_actual":  [1720, 1850, 1690, 1810, None, None, None],  # Fri-Sun not logged yet
+        "cal_target":  1800,
+        "workouts_by_type": {
+            "Strength": [
+                {"name": "Lower Body A", "detail": "Squat, RDL, Lunge",
+                 "done": True,  "note": "Felt strong"},
+                {"name": "Upper Body A", "detail": "Bench, Row, Press",
+                 "done": True,  "note": ""},
             ],
-            "totals": ["Total", "1,765", "148", "165", "52"],
-        },
-        "workout": {
-            "header": ["Exercise", "Sets x Reps", "Load", "Notes"],
-            "rows": [
-                ["Back Squat", "4 x 6", "90 kg", "RPE 8"],
-                ["Bench Press", "4 x 8", "70 kg", "Last set to failure"],
-                ["Romanian DL", "3 x 10", "80 kg", ""],
-                ["Pull-ups", "3 x max", "BW", "12/10/8"],
+            "Core": [
+                {"name": "Core Circuit", "detail": "Plank, Hollow, Leg raise",
+                 "done": True,  "note": ""},
+                {"name": "Core Circuit", "detail": "Plank, Hollow, Leg raise",
+                 "done": False, "note": "Scheduled Sat"},
+            ],
+            "Cardio": [
+                {"name": "Zone 2 Run", "detail": "40 min easy",
+                 "done": False, "note": "Scheduled Sun"},
             ],
         },
     }
     generate_report(weekly, mode="weekly", out="/home/claude/weekly_demo.pdf")
 
-    daily = dict(weekly)
-    daily["range_label"] = "Saturday, May 31, 2026"
-    daily["cal_labels"] = ["Breakfast", "Lunch", "Snack", "Dinner"]
-    daily["cal_intake"] = [420, 560, 210, 575]
+    daily = {
+        "user": "Alex R.",
+        "plan": "Lean Cut",
+        "range_label": "Saturday, May 31, 2026",
+        "summary_line": "Goal: Cut - 1,800 kcal/day target",
+        "kpis": [
+            ("Planned", "1,800"),
+            ("Actual", "1,210"),
+            ("Remaining", "590"),
+            ("Workout", "Planned"),
+        ],
+        "cal_labels":  ["Breakfast", "Lunch", "Snack", "Dinner"],
+        "cal_planned": [420, 560, 210, 610],
+        "cal_actual":  [420, 560, 230, None],   # dinner not logged yet
+        "cal_target":  1800,
+        "workouts_by_type": {
+            "Strength": [
+                {"name": "Lower Body B", "detail": "Deadlift, Split squat",
+                 "done": False, "note": "Planned 6pm"},
+            ],
+        },
+    }
     generate_report(daily, mode="daily", out="/home/claude/daily_demo.pdf")
     print("done")

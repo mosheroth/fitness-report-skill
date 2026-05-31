@@ -1,10 +1,15 @@
 # fitness-report-pdf
 
-A skill that generates polished PDF reports for a fitness bot — covering food (nutrition, macros, calories) and workouts (exercises, sets, training volume), with embedded charts.
+A skill that generates polished PDF reports for a fitness bot — covering **planned
+vs. actual calorie intake** and **planned vs. completed workouts** (grouped by
+client-defined types like Strength / Core / Cardio), with embedded charts. The
+report is built around the user's plan, so it shows the schedule ("the future")
+even when actual data is missing for some days.
 
 - Charts: matplotlib, rendered server-side as in-memory PNGs (headless `Agg` backend — no browser).
 - PDF: ReportLab (no Chromium / wkhtmltopdf dependency).
-- Two layouts from one entry point: **daily** and **weekly**.
+- Two framings from one entry point: **daily** and **weekly**.
+- **All input and output text must be English** (the built-in PDF font can't render Hebrew/Arabic).
 
 ## Repo layout
 

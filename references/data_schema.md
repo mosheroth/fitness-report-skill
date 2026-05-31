@@ -1,52 +1,76 @@
-# `data` dict schema
+# `data` dict schema (planned vs. actual)
 
-This is the input contract for `generate_report(data, mode, out)`. Build this dict from the user's logged food and workouts, then call the function. Every key listed under "Required (all modes)" must be present or the build raises a `KeyError`.
+Input contract for `generate_report(data, mode, out)`. The bot builds this dict
+from the user's plan + logged data, then calls the function.
 
-## Required (all modes)
+## LANGUAGE: English only (hard requirement)
 
-| Key | Type | Notes |
-|-----|------|-------|
-| `user` | str | Display name, e.g. `"Alex R."` |
-| `plan` | str | Plan/program name, e.g. `"Lean Cut"`. Shown in the title. |
-| `range_label` | str | Date or date-range string, e.g. `"May 25 – May 31, 2026"` (weekly) or `"Saturday, May 31, 2026"` (daily). Free text — you format it. |
-| `summary_line` | str | One-line goal summary under the header, e.g. `"Goal: Cut · 1,800 kcal/day target · 4 workouts/week"` |
-| `kpis` | list of `(label, value)` tuples | 3–4 recommended; they share a row, so more than 4 gets cramped. Both label and value are strings. |
-| `macros` | dict | `{"protein": int_g, "carbs": int_g, "fat": int_g}` — grams. Drives the donut + center total. |
-| `cal_labels` | list[str] | X-axis labels for the calories bar. Weekly: weekday names. Daily: meal names. |
-| `cal_intake` | list[number] | Bar heights (kcal), same length as `cal_labels`. |
-| `cal_target` | int | Drawn as a dashed target line on the calories chart. |
-| `nutrition` | dict | See below. |
-| `workout` | dict | See below. |
+All strings in `data` — and therefore everything in the PDF — MUST be English.
+The PDF uses ReportLab's built-in Helvetica font, which cannot render Hebrew,
+Arabic, or other non-Latin scripts; they show as blank boxes or mirrored text.
+The bot must translate/romanize any user-facing text (plan name, workout type
+names, workout names, details, notes, KPI labels) to English BEFORE building the
+dict. This includes the workout *type* names, which the client chooses freely
+(e.g. "Strength", "Core", "Cardio") but must supply in English.
 
-### `nutrition`
-```python
-"nutrition": {
-    "header": ["Meal", "kcal", "P (g)", "C (g)", "F (g)"],   # 5 columns expected by default widths
-    "rows":   [["Breakfast", "420", "32", "45", "12"], ...], # all cells strings
-    "totals": ["Total", "1,765", "148", "165", "52"],         # optional; rendered as a highlighted footer row
-}
-```
-`totals` is optional — omit the key to skip the footer row. Keep 5 columns to match the default column widths in `generate_report`; if you change the column count, also adjust the `col_widths` passed to `data_table` in the script.
+## Showing the future / missing data
 
-### `workout`
-```python
-"workout": {
-    "header": ["Exercise", "Sets x Reps", "Load", "Notes"],   # 4 columns expected by default widths
-    "rows":   [["Back Squat", "4 x 6", "90 kg", "RPE 8"], ...],
-}
-```
-No totals row for workouts. Keep 4 columns to match default widths.
+The report is built around the user's PLAN, so it shows upcoming days and
+scheduled workouts even when nothing has been logged yet:
 
-## Required for `mode="weekly"` only
+- Calories: every label in `cal_labels` shows its `cal_planned` bar. The matching
+  `cal_actual` entry may be `None` for days not logged — that day still shows the
+  plan, and the chart marks it "no data".
+- Workouts: every planned workout appears with a status (Done / Planned), so the
+  full schedule is visible regardless of completion.
 
-These power the second chart row (weight trend + training volume). They are ignored in daily mode.
+## Required keys (all modes)
 
 | Key | Type | Notes |
 |-----|------|-------|
-| `weight_labels` | list[str] | X-axis labels for the weight line (e.g. weekdays or dates). |
-| `weights` | list[number] | Bodyweight values (kg), same length as `weight_labels`. |
-| `vol_labels` | list[str] | Categories for the training-volume bar (e.g. `["Push","Pull","Legs","Full"]` or muscle groups). |
-| `vol_values` | list[number] | Volume per category (e.g. total sets), same length as `vol_labels`. |
+| `user` | str | Display name. English. |
+| `plan` | str | Program name, shown in title. English. |
+| `range_label` | str | Date or range string you format, e.g. `"May 25 - May 31, 2026"`. |
+| `summary_line` | str | One-line goal summary under the header. |
+| `kpis` | list of `(label, value)` | 3-4 tiles. Both strings. |
+| `cal_labels` | list[str] | X-axis. Weekly: weekday names. Daily: meal names. |
+| `cal_planned` | list[number] | Planned intake per label. Same length as `cal_labels`. |
+| `cal_actual` | list[number \| None] | Actual intake; use `None` where not logged (shows plan only). Same length as `cal_labels`. |
+| `cal_target` | number \| None | Optional dashed reference line. Omit or `None` to hide. |
+| `workouts_by_type` | dict | Maps a workout-type name (English, client-chosen) to a list of workout dicts. See below. |
+
+### `workouts_by_type`
+
+```python
+"workouts_by_type": {
+    "Strength": [                       # <- type name, English, client decides
+        {
+            "name":   "Lower Body A",   # workout name (English)
+            "detail": "Squat, RDL, Lunge",  # short description (English)
+            "done":   True,             # bool: completed or not
+            "note":   "Felt strong",    # optional free text (English)
+        },
+        # ... more workouts of this type
+    ],
+    "Core":   [ ... ],
+    "Cardio": [ ... ],
+}
+```
+
+For each type the report renders:
+- a bar in the "Workouts by Type - Planned vs Done" chart (count planned vs count done), and
+- a sub-table titled `"<Type> (done/total done)"` with one status-colored row per
+  workout: green = done, yellow = planned/not done.
+
+A type with an empty list renders the header plus "No workouts planned."
+
+## Mode differences
+
+`mode` is `"daily"` or `"weekly"` and only affects framing/labels you supply:
+- **weekly**: `cal_labels` = weekdays; `workouts_by_type` typically spans the week.
+- **daily**: `cal_labels` = meals of the day; `workouts_by_type` is usually that day's session(s).
+
+The function logic is the same; there are no weekly-only required keys anymore.
 
 ## Full weekly example
 
@@ -54,67 +78,62 @@ These power the second chart row (weight trend + training volume). They are igno
 data = {
     "user": "Alex R.",
     "plan": "Lean Cut",
-    "range_label": "May 25 – May 31, 2026",
-    "summary_line": "Goal: Cut · 1,800 kcal/day target · 4 workouts/week",
+    "range_label": "May 25 - May 31, 2026",
+    "summary_line": "Goal: Cut - 1,800 kcal/day target - 4 workouts/week",
     "kpis": [
-        ("Avg kcal", "1,765"),
-        ("Protein", "148g"),
-        ("Workouts", "4/4"),
-        ("Weight Δ", "-0.6 kg"),
+        ("Avg planned", "1,800"),
+        ("Avg actual", "1,765"),
+        ("Workouts done", "3/4"),
+        ("Days logged", "4/7"),
     ],
-    "macros": {"protein": 148, "carbs": 165, "fat": 52},
-    "cal_labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-    "cal_intake": [1720, 1850, 1690, 1810, 1900, 1650, 1730],
-    "cal_target": 1800,
-    "weight_labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-    "weights": [78.4, 78.2, 78.1, 77.9, 78.0, 77.8, 77.8],
-    "vol_labels": ["Push", "Pull", "Legs", "Full"],
-    "vol_values": [22, 20, 24, 16],
-    "nutrition": {
-        "header": ["Meal", "kcal", "P (g)", "C (g)", "F (g)"],
-        "rows": [
-            ["Breakfast", "420", "32", "45", "12"],
-            ["Lunch", "560", "48", "52", "18"],
-            ["Snack", "210", "18", "20", "6"],
-            ["Dinner", "575", "50", "48", "16"],
+    "cal_labels":  ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
+    "cal_planned": [1800, 1800, 1800, 1800, 1800, 2000, 2000],
+    "cal_actual":  [1720, 1850, 1690, 1810, None, None, None],
+    "cal_target":  1800,
+    "workouts_by_type": {
+        "Strength": [
+            {"name": "Lower Body A", "detail": "Squat, RDL, Lunge", "done": True,  "note": "Felt strong"},
+            {"name": "Upper Body A", "detail": "Bench, Row, Press",  "done": True,  "note": ""},
         ],
-        "totals": ["Total", "1,765", "148", "165", "52"],
-    },
-    "workout": {
-        "header": ["Exercise", "Sets x Reps", "Load", "Notes"],
-        "rows": [
-            ["Back Squat", "4 x 6", "90 kg", "RPE 8"],
-            ["Bench Press", "4 x 8", "70 kg", "Last set to failure"],
-            ["Romanian DL", "3 x 10", "80 kg", ""],
-            ["Pull-ups", "3 x max", "BW", "12/10/8"],
+        "Core": [
+            {"name": "Core Circuit", "detail": "Plank, Hollow, Leg raise", "done": True,  "note": ""},
+            {"name": "Core Circuit", "detail": "Plank, Hollow, Leg raise", "done": False, "note": "Scheduled Sat"},
+        ],
+        "Cardio": [
+            {"name": "Zone 2 Run", "detail": "40 min easy", "done": False, "note": "Scheduled Sun"},
         ],
     },
 }
+generate_report(data, mode="weekly", out="report.pdf")
 ```
 
 ## Daily example
-
-Same as above but drop the weekly-only keys and switch the calorie chart to per-meal:
 
 ```python
 daily = {
     "user": "Alex R.",
     "plan": "Lean Cut",
     "range_label": "Saturday, May 31, 2026",
-    "summary_line": "Goal: Cut · 1,800 kcal/day target",
-    "kpis": [("Today", "1,765 kcal"), ("Protein", "148g"), ("Workout", "Done"), ("Target", "1,800")],
-    "macros": {"protein": 148, "carbs": 165, "fat": 52},
-    "cal_labels": ["Breakfast", "Lunch", "Snack", "Dinner"],
-    "cal_intake": [420, 560, 210, 575],
-    "cal_target": 1800,
-    "nutrition": { ... },   # same shape as above
-    "workout":   { ... },   # same shape as above
+    "summary_line": "Goal: Cut - 1,800 kcal/day target",
+    "kpis": [("Planned", "1,800"), ("Actual", "1,210"), ("Remaining", "590"), ("Workout", "Planned")],
+    "cal_labels":  ["Breakfast", "Lunch", "Snack", "Dinner"],
+    "cal_planned": [420, 560, 210, 610],
+    "cal_actual":  [420, 560, 230, None],     # dinner not logged yet
+    "cal_target":  1800,
+    "workouts_by_type": {
+        "Strength": [
+            {"name": "Lower Body B", "detail": "Deadlift, Split squat", "done": False, "note": "Planned 6pm"},
+        ],
+    },
 }
 generate_report(daily, mode="daily", out="report.pdf")
 ```
 
 ## Tips
 
-- All table cells are strings — format numbers (thousands separators, units) before putting them in. The generator does not format for you.
-- List-length mismatches (e.g. `cal_intake` shorter than `cal_labels`) will produce a misaligned chart rather than an error, so validate lengths when building from live data.
-- For an empty day (no workout logged), pass a single placeholder row like `["Rest day", "—", "—", "—"]` so the table isn't blank.
+- All cells/labels are strings (or numbers for the calorie lists) — format numbers
+  (units, separators) before passing them in.
+- Keep `cal_planned` and `cal_actual` the same length as `cal_labels`. Use `None`
+  in `cal_actual` for "not logged yet" rather than `0` (which would look like a
+  logged zero-calorie day).
+- Workout type names are free text but must be English and are shown verbatim.
