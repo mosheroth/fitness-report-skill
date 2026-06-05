@@ -18,11 +18,42 @@ dict. This includes the workout *type* names, which the client chooses freely
 The report is built around the user's PLAN, so it shows upcoming days and
 scheduled workouts even when nothing has been logged yet:
 
-- Calories: every label in `cal_labels` shows its `cal_planned` bar. The matching
-  `cal_actual` entry may be `None` for days not logged — that day still shows the
-  plan, and the chart marks it "no data".
+- Calories (weekly): every day in the Sun..Sat week shows its planned bar. A day's
+  `actual` may be `None` when not logged — that day still shows the plan and is
+  marked "no data". Days entirely absent from `cal_days` are auto-filled the same way.
 - Workouts: every planned workout appears with a status (Done / Planned), so the
   full schedule is visible regardless of completion.
+
+## Weekly calorie input: dated entries, always Sunday -> Saturday
+
+For `mode="weekly"`, calories are passed as **dated entries**, not parallel lists.
+The skill always renders the week as Sunday -> Saturday regardless of the order you
+send, and fills any missing days so all seven weekday columns always appear.
+
+```python
+"cal_days": [
+    {"date": "2026-05-24", "planned": 1800, "actual": 1720},  # Sun
+    {"date": "2026-05-25", "planned": 1800, "actual": 1810},  # Mon
+    {"date": "2026-05-27", "planned": 1800, "actual": 1690},  # Wed
+    {"date": "2026-05-28", "planned": 1800, "actual": None},  # Thu, not logged
+    # any order; missing days (e.g. Fri/Sat) are auto-filled planned=0, actual=None
+],
+"week_of": "2026-05-24",   # OPTIONAL "YYYY-MM-DD"; picks which week to show.
+                            # If omitted, the week containing the earliest date is used.
+```
+
+- `date`: ISO `"YYYY-MM-DD"` string (or a `datetime.date`). Used to place the entry
+  on the correct weekday and to sort Sunday-first.
+- `planned`: planned intake for that day (number).
+- `actual`: actual logged intake, or `None` if not logged yet (shows plan + "no data").
+- Day labels on the chart are derived automatically (Sun, Mon, ... Sat) — you do not
+  pass labels for weekly mode.
+- Missing days are filled with `planned=0, actual=None`. If you want a real planned
+  value shown for a future day, include that day in `cal_days` with its planned number
+  and `actual=None`.
+
+For `mode="daily"`, dates do not apply (meals, not days), so daily keeps the simple
+parallel lists: `cal_labels`, `cal_planned`, `cal_actual` (see the daily example).
 
 ## Required keys (all modes)
 
@@ -33,10 +64,8 @@ scheduled workouts even when nothing has been logged yet:
 | `range_label` | str | Date or range string you format, e.g. `"May 25 - May 31, 2026"`. |
 | `summary_line` | str | One-line goal summary under the header. |
 | `kpis` | list of `(label, value)` | 3-4 tiles. Both strings. |
-| `cal_labels` | list[str] | X-axis. Weekly: weekday names. Daily: meal names. |
-| `cal_planned` | list[number] | Planned intake per label. Same length as `cal_labels`. |
-| `cal_actual` | list[number \| None] | Actual intake; use `None` where not logged (shows plan only). Same length as `cal_labels`. |
 | `cal_target` | number \| None | Optional dashed reference line. Omit or `None` to hide. |
+| *calories* | — | Weekly: `cal_days` (+ optional `week_of`). Daily: `cal_labels`, `cal_planned`, `cal_actual`. See the calorie section above. |
 | `workouts_by_type` | dict | Maps a workout-type name (English, client-chosen) to a list of workout dicts. See below. |
 
 ### `workouts_by_type`
@@ -64,11 +93,57 @@ For each type the report renders:
 
 A type with an empty list renders the header plus "No workouts planned."
 
+
+## Overall progress gauges (replaces the per-type bar chart)
+
+The report shows two semicircular gauges side by side, computed automatically:
+
+- **Workouts completed** — done vs planned across all `workouts_by_type`
+  (center shows `done/planned`, e.g. `3/5`).
+- **Calorie adherence** — sum of actual vs sum of planned, counting only days that
+  have a logged `actual` (center shows a percentage). Color: green >= 90%,
+  amber 60-89%, red < 60%.
+
+These are derived from data you already pass; no extra keys are required for them.
+
+## Day-by-day detail (optional `days`)
+
+To include a per-day breakdown of workouts done and food eaten, pass a `days` list.
+It renders on its own page after the schedule. Each entry:
+
+```python
+"days": [
+    {
+        "label": "Sunday, May 24",           # English, you format it
+        "workouts": [                          # same workout dict shape as elsewhere
+            {"name": "Lower Body A", "detail": "Squat, RDL, Lunge",
+             "done": True, "note": "Felt strong"},
+        ],
+        "foods": [                             # what was eaten that day
+            {"name": "Oats with berries", "kcal": 420, "protein": 18, "carbs": 62, "fat": 10},
+            {"name": "Chicken rice bowl", "kcal": 560, "protein": 45, "carbs": 55, "fat": 16},
+        ],
+    },
+    # ... one entry per day you want to show
+]
+```
+
+- `label`: free text day heading (English).
+- `workouts`: list of the usual workout dicts (`name`, `detail`, `done`, `note`);
+  rendered as a status-colored table. Empty list -> "No workouts."
+- `foods`: list of `{"name", "kcal", "protein", "carbs", "fat"}`. Macros are grams.
+  Any numeric field may be omitted/None (shows "-"); a totals row sums what's present.
+  Empty list -> "No food logged."
+- `days` is optional and is the same for daily and weekly mode. Omit it to skip the
+  per-day section entirely.
+
 ## Mode differences
 
 `mode` is `"daily"` or `"weekly"` and only affects framing/labels you supply:
-- **weekly**: `cal_labels` = weekdays; `workouts_by_type` typically spans the week.
-- **daily**: `cal_labels` = meals of the day; `workouts_by_type` is usually that day's session(s).
+- **weekly**: calories via `cal_days` (dated), always rendered Sunday..Saturday;
+  `workouts_by_type` typically spans the week.
+- **daily**: calories via `cal_labels`/`cal_planned`/`cal_actual` (meals of the day);
+  `workouts_by_type` is usually that day's session(s).
 
 The function logic is the same; there are no weekly-only required keys anymore.
 
@@ -86,9 +161,14 @@ data = {
         ("Workouts done", "3/4"),
         ("Days logged", "4/7"),
     ],
-    "cal_labels":  ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-    "cal_planned": [1800, 1800, 1800, 1800, 1800, 2000, 2000],
-    "cal_actual":  [1720, 1850, 1690, 1810, None, None, None],
+    "cal_days": [   # any order; missing days auto-filled; rendered Sun..Sat
+        {"date": "2026-05-24", "planned": 1800, "actual": 1720},
+        {"date": "2026-05-25", "planned": 1800, "actual": 1810},
+        {"date": "2026-05-26", "planned": 1800, "actual": 1850},
+        {"date": "2026-05-27", "planned": 1800, "actual": 1690},
+        {"date": "2026-05-28", "planned": 1800, "actual": None},
+    ],
+    "week_of": "2026-05-24",   # optional
     "cal_target":  1800,
     "workouts_by_type": {
         "Strength": [
@@ -133,7 +213,8 @@ generate_report(daily, mode="daily", out="report.pdf")
 
 - All cells/labels are strings (or numbers for the calorie lists) — format numbers
   (units, separators) before passing them in.
-- Keep `cal_planned` and `cal_actual` the same length as `cal_labels`. Use `None`
-  in `cal_actual` for "not logged yet" rather than `0` (which would look like a
-  logged zero-calorie day).
+- Daily mode: keep `cal_planned` and `cal_actual` the same length as `cal_labels`.
+  Use `None` (not `0`) for "not logged yet".
+- Weekly mode: you don't pass labels; weekday labels are derived from the dates and
+  the week is always Sunday..Saturday.
 - Workout type names are free text but must be English and are shown verbatim.

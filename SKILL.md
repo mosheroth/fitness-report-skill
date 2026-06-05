@@ -14,14 +14,15 @@ actual data has been logged yet ("show the future"). One entry point, two framin
 
 What it shows:
 - **Calories** — planned intake per day/meal as bars, with actual logged intake
-  overlaid. Days with no logged data still show the plan and are marked "no data".
-  An optional dashed target line.
-- **Workouts** — grouped by **client-defined type** (e.g. Strength, Core, Cardio).
-  A chart compares planned vs. completed counts per type; a status-colored table
-  lists each workout as Done (green) or Planned (yellow).
-
-There is no meals table and no macro breakdown — only calorie targets/actuals and
-the workout schedule.
+  overlaid. In weekly mode the week is always rendered Sunday→Saturday (from dated
+  entries, any order, missing days filled). Days with no logged data still show the
+  plan and are marked "no data". An optional dashed target line.
+- **Overall progress** — two semicircular gauges: workouts completed (done vs
+  planned) and calorie adherence (actual vs planned %, colored by how close).
+- **Workouts** — grouped by **client-defined type** (e.g. Strength, Core, Cardio),
+  with a status-colored table listing each workout as Done (green) or Planned (yellow).
+- **Day-by-day detail** (optional) — a per-day page showing each day's workouts and
+  the food eaten that day (name + calories + protein/carbs/fat, with totals).
 
 Charts are matplotlib PNGs rendered in-memory (headless `Agg` backend), embedded
 into a ReportLab document. No Chromium / wkhtmltopdf dependency.
@@ -81,10 +82,19 @@ Quick shape (see the reference for details):
 data = {
     "user": str, "plan": str, "range_label": str, "summary_line": str,
     "kpis": [(label, value), ...],          # 3-4 tiles
-    "cal_labels":  [str, ...],              # days (weekly) or meals (daily)
-    "cal_planned": [number, ...],           # planned intake per label
-    "cal_actual":  [number | None, ...],    # actual; None = not logged yet
     "cal_target":  number | None,           # optional dashed line
+
+    # WEEKLY calories: dated entries, any order, gaps OK.
+    # Always rendered Sunday -> Saturday; missing days auto-filled.
+    "cal_days": [
+        {"date": "YYYY-MM-DD", "planned": number, "actual": number | None},
+        ...
+    ],
+    "week_of": "YYYY-MM-DD",                 # optional; defaults to week of earliest date
+
+    # DAILY calories instead use per-meal parallel lists:
+    # "cal_labels": [str, ...], "cal_planned": [number, ...], "cal_actual": [number|None, ...]
+
     "workouts_by_type": {                   # client-defined English type names
         "Strength": [
             {"name": str, "detail": str, "done": bool, "note": str},
@@ -92,11 +102,23 @@ data = {
         ],
         "Core": [ ... ],
     },
+
+    # OPTIONAL day-by-day detail page: each day's workouts + food eaten.
+    "days": [
+        {
+            "label": str,                   # day heading, English
+            "workouts": [ {"name", "detail", "done", "note"}, ... ],
+            "foods": [ {"name", "kcal", "protein", "carbs", "fat"}, ... ],
+        },
+        ...
+    ],
 }
 ```
 
-Use `None` (not `0`) in `cal_actual` for days not yet logged, so the chart shows the
-plan and a "no data" marker instead of a logged zero.
+Weekly calorie days are always ordered **Sunday → Saturday** by the skill, no matter
+what order `cal_days` is sent in, and any missing weekday is filled so all seven
+columns always show. Use `None` (not `0`) for a day's `actual` when it isn't logged
+yet, so the chart shows the plan and a "no data" marker instead of a logged zero.
 
 ## Customization
 

@@ -25,7 +25,7 @@ Install:
 """
 
 import io
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import matplotlib
 matplotlib.use("Agg")  # headless
@@ -36,7 +36,8 @@ from reportlab.lib.units import mm
 from reportlab.lib import colors
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, HRFlowable
+    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image, HRFlowable,
+    PageBreak
 )
 
 # ---- theme ----------------------------------------------------------------
@@ -56,6 +57,52 @@ def _fig_to_png(fig):
     plt.close(fig)
     buf.seek(0)
     return buf
+
+
+def _parse_date(d):
+    """Accept a date/datetime or an ISO 'YYYY-MM-DD' string; return a date."""
+    if isinstance(d, datetime):
+        return d.date()
+    if isinstance(d, date):
+        return d
+    return datetime.strptime(str(d)[:10], "%Y-%m-%d").date()
+
+
+def _week_sunday(anchor):
+    """Return the Sunday on or before `anchor` (Python weekday: Mon=0..Sun=6)."""
+    return anchor - timedelta(days=(anchor.weekday() + 1) % 7)
+
+
+def build_sun_to_sat(cal_days, week_of=None):
+    """
+    Normalize dated calorie entries into a fixed Sunday->Saturday week.
+
+    cal_days: list of dicts, each {"date": <date|'YYYY-MM-DD'>, "planned": number,
+              "actual": number|None}. Order does not matter; gaps are allowed.
+    week_of:  optional date/str anchoring the week. If None, the week containing
+              the earliest entry is used.
+
+    Returns (labels, planned, actual) as 7-element lists, Sunday first.
+    Missing days get planned=0 and actual=None so the chart still shows all 7 days.
+    """
+    parsed = []
+    for r in cal_days:
+        parsed.append((_parse_date(r["date"]), r.get("planned", 0), r.get("actual")))
+    if not parsed and week_of is None:
+        raise ValueError("build_sun_to_sat needs either cal_days or week_of")
+
+    anchor = _parse_date(week_of) if week_of is not None else min(p[0] for p in parsed)
+    sunday = _week_sunday(anchor)
+    week = [sunday + timedelta(days=i) for i in range(7)]
+    by_date = {d: (pl, ac) for d, pl, ac in parsed}
+
+    labels, planned, actual = [], [], []
+    for d in week:
+        pl, ac = by_date.get(d, (0, None))
+        labels.append(d.strftime("%a"))   # Sun, Mon, ... Sat (English)
+        planned.append(pl)
+        actual.append(ac)
+    return labels, planned, actual
 
 
 def calories_planned_vs_actual(labels, planned, actual, target=None):
@@ -94,24 +141,48 @@ def calories_planned_vs_actual(labels, planned, actual, target=None):
     return _fig_to_png(fig)
 
 
-def workout_type_bar(type_labels, planned_counts, done_counts):
-    """Per workout-type: planned vs completed counts."""
-    n = len(type_labels)
-    x = range(n)
-    w = 0.4
-    fig, ax = plt.subplots(figsize=(6.6, 2.9))
-    ax.bar([i - w / 2 for i in x], planned_counts, width=w, color="#1f6feb",
-           alpha=0.55, label="Planned")
-    ax.bar([i + w / 2 for i in x], done_counts, width=w, color="#22c55e",
-           label="Done")
-    ax.set_xticks(list(x))
-    ax.set_xticklabels(type_labels, fontsize=8)
-    ax.set_ylabel("workouts", fontsize=8)
-    ax.legend(frameon=False, fontsize=8, loc="upper right")
-    for s in ("top", "right"):
-        ax.spines[s].set_visible(False)
-    ax.tick_params(labelsize=8)
+
+
+def _draw_gauge(ax, pct, title, center_label):
+    """Draw a single semicircular gauge on the given axes. pct in 0..100+."""
+    import numpy as np
+    pct_clamped = max(0.0, min(pct, 100.0))
+    # color by completion
+    if pct_clamped >= 90:
+        fill = "#22c55e"
+    elif pct_clamped >= 60:
+        fill = "#f59e0b"
+    else:
+        fill = "#ef4444"
+
+    # background arc (180deg -> 0deg, i.e. left to right over the top)
+    theta = np.linspace(np.pi, 0, 200)
+    ax.plot(np.cos(theta), np.sin(theta), lw=14, color="#e5e7eb",
+            solid_capstyle="round")
+    # filled portion
+    frac = pct_clamped / 100.0
+    theta_f = np.linspace(np.pi, np.pi - np.pi * frac, max(2, int(200 * frac)))
+    ax.plot(np.cos(theta_f), np.sin(theta_f), lw=14, color=fill,
+            solid_capstyle="round")
+    # center text
+    ax.text(0, 0.18, center_label, ha="center", va="center",
+            fontsize=20, fontweight="bold", color="#111827")
+    ax.text(0, -0.12, title, ha="center", va="center",
+            fontsize=10, color="#6b7280")
+    ax.set_xlim(-1.25, 1.25)
+    ax.set_ylim(-0.3, 1.25)
+    ax.set_aspect("equal")
+    ax.axis("off")
+
+
+def gauges_pair(workout_pct, workout_label, nutrition_pct, nutrition_label):
+    """Two semicircular gauges side by side: workouts and nutrition."""
+    fig, axes = plt.subplots(1, 2, figsize=(6.6, 2.4))
+    _draw_gauge(axes[0], workout_pct, "Workouts completed", workout_label)
+    _draw_gauge(axes[1], nutrition_pct, "Calorie adherence", nutrition_label)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.98, bottom=0.02, wspace=0.1)
     return _fig_to_png(fig)
+
 
 
 # ---- layout helpers -------------------------------------------------------
@@ -159,35 +230,110 @@ def workout_table(rows, S):
     rows: list of dicts: {"name", "detail", "done" (bool), "note"}
     Status-colored rows: green = done, yellow = planned/not done.
     """
-    header = ["Workout", "Detail", "Status", "Note"]
+    # Cell paragraph styles so long text wraps within the column width
+    # instead of overflowing into adjacent cells.
+    cell = ParagraphStyle("wo_cell", fontName="Helvetica", fontSize=8.5,
+                          leading=10.5, textColor=DARK)
+    cell_b = ParagraphStyle("wo_cell_b", parent=cell, fontName="Helvetica-Bold")
+    hdr = ParagraphStyle("wo_hdr", fontName="Helvetica-Bold", fontSize=8.5,
+                         leading=10.5, textColor=colors.white)
+
+    def esc(s):
+        # Paragraph parses minimal XML; escape so &, <, > in user text are literal.
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    header = [Paragraph(h, hdr) for h in ("Workout", "Detail", "Status", "Note")]
     body = [header]
     status_rows = []
     for i, r in enumerate(rows, start=1):
         done = bool(r.get("done"))
         body.append([
-            r.get("name", ""),
-            r.get("detail", ""),
-            "Done" if done else "Planned",
-            r.get("note", ""),
+            Paragraph(esc(r.get("name", "")), cell_b),
+            Paragraph(esc(r.get("detail", "")), cell),
+            Paragraph("Done" if done else "Planned", cell_b),
+            Paragraph(esc(r.get("note", "")), cell),
         ])
         status_rows.append((i, done))
     t = Table(body, colWidths=[52 * mm, 46 * mm, 24 * mm, 48 * mm], repeatRows=1)
     style = [
         ("BACKGROUND", (0, 0), (-1, 0), ACCENT),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 8.5),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("TOPPADDING", (0, 0), (-1, -1), 4),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
         ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("FONTNAME", (2, 1), (2, -1), "Helvetica-Bold"),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
     ]
     for ridx, done in status_rows:
         style.append(("BACKGROUND", (0, ridx), (-1, ridx),
                       DONE_BG if done else PENDING_BG))
     t.setStyle(TableStyle(style))
+    return t
+
+
+def food_table(items, S):
+    """
+    items: list of dicts {"name", "kcal", "protein", "carbs", "fat"}.
+    Renders a compact meal table with a totals row. Numbers may be int/float/str.
+    """
+    cell = ParagraphStyle("food_cell", fontName="Helvetica", fontSize=8,
+                          leading=10, textColor=DARK)
+    cell_r = ParagraphStyle("food_cell_r", parent=cell, alignment=2)  # right
+    hdr = ParagraphStyle("food_hdr", fontName="Helvetica-Bold", fontSize=8,
+                         leading=10, textColor=colors.white)
+    hdr_r = ParagraphStyle("food_hdr_r", parent=hdr, alignment=2)
+
+    def esc(s):
+        return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    def num(v):
+        if v is None or v == "":
+            return "-"
+        if isinstance(v, float) and v.is_integer():
+            v = int(v)
+        return str(v)
+
+    header = [Paragraph("Food", hdr),
+              Paragraph("kcal", hdr_r), Paragraph("P", hdr_r),
+              Paragraph("C", hdr_r), Paragraph("F", hdr_r)]
+    body = [header]
+    tot = {"kcal": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}
+    have = {"kcal": False, "protein": False, "carbs": False, "fat": False}
+    for it in items:
+        for k in tot:
+            v = it.get(k)
+            if isinstance(v, (int, float)):
+                tot[k] += v
+                have[k] = True
+        body.append([
+            Paragraph(esc(it.get("name", "")), cell),
+            Paragraph(num(it.get("kcal")), cell_r),
+            Paragraph(num(it.get("protein")), cell_r),
+            Paragraph(num(it.get("carbs")), cell_r),
+            Paragraph(num(it.get("fat")), cell_r),
+        ])
+    # totals row (only sums columns that had at least one numeric value)
+    tcell = ParagraphStyle("food_tot", parent=cell, fontName="Helvetica-Bold")
+    tcell_r = ParagraphStyle("food_tot_r", parent=tcell, alignment=2)
+    body.append([
+        Paragraph("Total", tcell),
+        Paragraph(num(round(tot["kcal"])) if have["kcal"] else "-", tcell_r),
+        Paragraph(num(round(tot["protein"])) if have["protein"] else "-", tcell_r),
+        Paragraph(num(round(tot["carbs"])) if have["carbs"] else "-", tcell_r),
+        Paragraph(num(round(tot["fat"])) if have["fat"] else "-", tcell_r),
+    ])
+    t = Table(body, colWidths=[78 * mm, 24 * mm, 22 * mm, 22 * mm, 24 * mm],
+              repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), ACTUAL),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#e5e7eb")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LEFTPADDING", (0, 0), (-1, -1), 5),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 5),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor("#e0ecff")),
+    ]))
     return t
 
 
@@ -220,17 +366,22 @@ def generate_report(data, mode="weekly", out="report.pdf"):
     Required keys (all modes):
         user, plan, range_label, summary_line
         kpis: [(label, value), ...]
-        cal_labels:  [str, ...]            x-axis (days for weekly, meals/day for daily)
-        cal_planned: [number, ...]         planned intake per label
-        cal_actual:  [number|None, ...]    actual intake; None => no data (shows plan only)
         cal_target:  number | None         optional dashed reference line
         workouts_by_type: {
             "<Type name in English>": [
                 {"name", "detail", "done": bool, "note"}, ...
             ], ...
         }
-    Weekly also uses:
-        type_summary: derived automatically from workouts_by_type if absent
+
+    Calorie input depends on mode:
+      WEEKLY: provide `cal_days`, a list of dated entries (any order, gaps OK):
+          cal_days: [{"date": "YYYY-MM-DD", "planned": num, "actual": num|None}, ...]
+        The week is ALWAYS rendered Sunday -> Saturday. Missing days are filled
+        (planned=0, actual=None) so all 7 weekday columns always appear. Optionally
+        pass `week_of` ("YYYY-MM-DD") to pick the week explicitly; otherwise the week
+        containing the earliest entry is used.
+      DAILY: provide the per-meal lists directly (dates don't apply to meals):
+          cal_labels: [str, ...]; cal_planned: [num, ...]; cal_actual: [num|None, ...]
     """
     S = _styles()
     doc = SimpleDocTemplate(out, pagesize=A4,
@@ -251,20 +402,48 @@ def generate_report(data, mode="weekly", out="report.pdf"):
     E.append(Spacer(1, 10))
 
     # calorie chart: planned vs actual
+    # Weekly is always normalized to a fixed Sunday->Saturday week from dated
+    # entries; daily uses the per-meal lists as given.
+    if mode == "weekly":
+        cal_labels, cal_planned, cal_actual = build_sun_to_sat(
+            data["cal_days"], week_of=data.get("week_of"))
+    else:
+        cal_labels = data["cal_labels"]
+        cal_planned = data["cal_planned"]
+        cal_actual = data["cal_actual"]
+
     E.append(Paragraph("Calorie Intake - Planned vs Actual", S["Sec"]))
     cals = img(calories_planned_vs_actual(
-        data["cal_labels"], data["cal_planned"], data["cal_actual"],
-        data.get("cal_target")), 168)
+        cal_labels, cal_planned, cal_actual, data.get("cal_target")), 168)
     E.append(cals)
 
-    # workout-type summary chart (planned vs done counts)
+    # Two overall gauges: workout completion and calorie adherence.
     wbt = data.get("workouts_by_type", {})
-    if wbt:
-        type_labels = list(wbt.keys())
-        planned_counts = [len(v) for v in wbt.values()]
-        done_counts = [sum(1 for w in v if w.get("done")) for v in wbt.values()]
-        E.append(Paragraph("Workouts by Type - Planned vs Done", S["Sec"]))
-        E.append(img(workout_type_bar(type_labels, planned_counts, done_counts), 168))
+    all_workouts = [w for items in wbt.values() for w in items]
+    total_planned_workouts = len(all_workouts)
+    total_done_workouts = sum(1 for w in all_workouts if w.get("done"))
+    workout_pct = (100.0 * total_done_workouts / total_planned_workouts
+                   if total_planned_workouts else 0.0)
+    workout_label = f"{total_done_workouts}/{total_planned_workouts}"
+
+    # Calorie adherence: how close actual total is to planned total.
+    # Only days with logged actual count toward both sides (fair comparison).
+    planned_sum = 0.0
+    actual_sum = 0.0
+    for pl, ac in zip(cal_planned, cal_actual):
+        if ac is not None:
+            planned_sum += (pl or 0)
+            actual_sum += ac
+    if planned_sum > 0:
+        nutrition_pct = 100.0 * actual_sum / planned_sum
+        nutrition_label = f"{round(nutrition_pct)}%"
+    else:
+        nutrition_pct = 0.0
+        nutrition_label = "no data"
+
+    E.append(Paragraph("Overall Progress", S["Sec"]))
+    E.append(img(gauges_pair(workout_pct, workout_label,
+                             nutrition_pct, nutrition_label), 150))
 
     # workout detail, grouped by type
     if wbt:
@@ -277,6 +456,26 @@ def generate_report(data, mode="weekly", out="report.pdf"):
             else:
                 E.append(Paragraph("No workouts planned.", S["Sub"]))
             E.append(Spacer(1, 4))
+
+    # day-by-day detail: per day, workouts done + food eaten that day
+    days = data.get("days")
+    if days:
+        E.append(PageBreak())
+        E.append(Paragraph("Day-by-Day Detail", S["Sec"]))
+        for d in days:
+            E.append(Paragraph(d.get("label", ""), S["TypeHdr"]))
+            wos = d.get("workouts", [])
+            if wos:
+                E.append(workout_table(wos, S))
+                E.append(Spacer(1, 3))
+            else:
+                E.append(Paragraph("No workouts.", S["Sub"]))
+            foods = d.get("foods", [])
+            if foods:
+                E.append(food_table(foods, S))
+            else:
+                E.append(Paragraph("No food logged.", S["Sub"]))
+            E.append(Spacer(1, 8))
 
     doc.build(E, onFirstPage=_footer, onLaterPages=_footer)
     return out
@@ -295,9 +494,17 @@ if __name__ == "__main__":
             ("Workouts done", "3/4"),
             ("Days logged", "4/7"),
         ],
-        "cal_labels":  ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"],
-        "cal_planned": [1800, 1800, 1800, 1800, 1800, 2000, 2000],
-        "cal_actual":  [1720, 1850, 1690, 1810, None, None, None],  # Fri-Sun not logged yet
+        # Dated entries in deliberately shuffled order with a couple of days
+        # missing — the report still renders a full Sunday..Saturday week.
+        # (Week of May 24 2026 is Sun May 24 .. Sat May 30.)
+        "cal_days": [
+            {"date": "2026-05-27", "planned": 1800, "actual": 1690},  # Wed
+            {"date": "2026-05-24", "planned": 1800, "actual": 1720},  # Sun
+            {"date": "2026-05-26", "planned": 1800, "actual": 1850},  # Tue
+            {"date": "2026-05-25", "planned": 1800, "actual": 1810},  # Mon
+            {"date": "2026-05-28", "planned": 1800, "actual": None},  # Thu (not logged)
+            # Fri May 29 and Sat May 30 omitted entirely -> auto-filled
+        ],
         "cal_target":  1800,
         "workouts_by_type": {
             "Strength": [
@@ -317,6 +524,48 @@ if __name__ == "__main__":
                  "done": False, "note": "Scheduled Sun"},
             ],
         },
+        # Day-by-day detail: each day's workouts + food eaten that day.
+        "days": [
+            {
+                "label": "Sunday, May 24",
+                "workouts": [
+                    {"name": "Lower Body A", "detail": "Squat, RDL, Lunge",
+                     "done": True, "note": "Felt strong"},
+                ],
+                "foods": [
+                    {"name": "Oats with berries", "kcal": 420, "protein": 18, "carbs": 62, "fat": 10},
+                    {"name": "Chicken rice bowl", "kcal": 560, "protein": 45, "carbs": 55, "fat": 16},
+                    {"name": "Greek yogurt", "kcal": 180, "protein": 18, "carbs": 12, "fat": 6},
+                    {"name": "Salmon & veg", "kcal": 560, "protein": 42, "carbs": 30, "fat": 26},
+                ],
+            },
+            {
+                "label": "Monday, May 25",
+                "workouts": [
+                    {"name": "Upper Body A", "detail": "Bench, Row, Press",
+                     "done": True, "note": ""},
+                ],
+                "foods": [
+                    {"name": "Eggs & toast", "kcal": 400, "protein": 26, "carbs": 30, "fat": 18},
+                    {"name": "Turkey wrap", "kcal": 520, "protein": 40, "carbs": 48, "fat": 18},
+                    {"name": "Protein shake", "kcal": 230, "protein": 30, "carbs": 12, "fat": 5},
+                    {"name": "Beef stir-fry", "kcal": 660, "protein": 46, "carbs": 52, "fat": 28},
+                ],
+            },
+            {
+                "label": "Tuesday, May 26",
+                "workouts": [
+                    {"name": "Core Circuit", "detail": "Plank, Hollow, Leg raise",
+                     "done": True, "note": ""},
+                ],
+                "foods": [
+                    {"name": "Smoothie bowl", "kcal": 380, "protein": 20, "carbs": 58, "fat": 9},
+                    {"name": "Tuna salad", "kcal": 480, "protein": 42, "carbs": 22, "fat": 24},
+                    {"name": "Apple & PB", "kcal": 220, "protein": 6, "carbs": 28, "fat": 11},
+                    {"name": "Pasta bolognese", "kcal": 770, "protein": 38, "carbs": 88, "fat": 26},
+                ],
+            },
+        ],
     }
     generate_report(weekly, mode="weekly", out="/home/claude/weekly_demo.pdf")
 
